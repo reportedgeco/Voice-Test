@@ -1,5 +1,5 @@
 /**
- * ReportEdge Voice Concierge — Tool Configuration
+ * Chitti — ReportEdge Voice Agent — Tool Configuration
  * -------------------------------------------------
  * Edit this file to add/change tools, summaries, spoken examples,
  * and the page URL the agent should navigate to when a tool is picked.

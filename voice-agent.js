@@ -1,5 +1,5 @@
 /**
- * ReportEdge Voice Concierge
+ * Chitti — ReportEdge Voice Agent
  * ---------------------------------------------------------------
  * Free, zero-backend voice agent using the browser's built-in
  * Web Speech API (SpeechRecognition + speechSynthesis).
@@ -64,7 +64,9 @@
 #rev-input{flex:1;padding:8px 10px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px}\
 #rev-foot button{border:none;border-radius:10px;padding:8px 10px;cursor:pointer;background:#e2e8f0;font-size:16px}\
 #rev-mic.on{background:#ef4444;color:#fff}\
-#rev-hear{margin:0 12px 8px;padding:8px;border-radius:10px;border:none;background:#16a34a;color:#fff;font-weight:600;cursor:pointer;display:none}\
+#rev-hear{margin:0 12px 8px;padding:8px;border-radius:10px;border:none;background:#15803d;color:#fff;font-weight:600;cursor:pointer;display:none}\
+#rev-fab:focus-visible,#rev-panel button:focus-visible,#rev-input:focus-visible{outline:3px solid #f59e0b;outline-offset:2px}\
+@media (max-width:480px){#rev-panel{left:10px;bottom:84px;max-width:calc(100vw - 20px)}#rev-fab{left:12px;bottom:12px}}\
 ";
   var styleEl = document.createElement("style");
   styleEl.textContent = css;
@@ -72,14 +74,14 @@
 
   var root = document.createElement("div");
   root.innerHTML =
-    '<button id="rev-fab" aria-label="Open voice assistant" title="Talk to ReportEdge assistant">🎙️</button>' +
-    '<div id="rev-panel" role="dialog" aria-label="ReportEdge voice assistant">' +
-    '<div id="rev-head"><span>ReportEdge Assistant</span><span><button id="rev-mute" title="Mute voice">🔊</button><button id="rev-close" title="Close">✕</button></span></div>' +
-    '<div id="rev-log"></div>' +
+    '<button id="rev-fab" aria-label="Open Chitti voice assistant" aria-expanded="false" aria-controls="rev-panel" title="Talk to Chitti">🎙️</button>' +
+    '<div id="rev-panel" role="dialog" aria-label="Chitti, ReportEdge voice assistant">' +
+    '<div id="rev-head"><span>Chitti · ReportEdge</span><span><button id="rev-mute" aria-label="Mute voice" title="Mute voice">🔊</button><button id="rev-close" aria-label="Close assistant" title="Close">✕</button></span></div>' +
+    '<div id="rev-log" role="log" aria-live="polite"></div>' +
     '<div id="rev-choice" style="display:none"><button data-t="individual">Individual</button><button data-t="company">Company</button></div>' +
     '<div id="rev-cards"></div>' +
     '<button id="rev-hear">▶ Hear the explanation</button>' +
-    '<div id="rev-foot"><input id="rev-input" placeholder="Type here or tap the mic…" autocomplete="off"/><button id="rev-mic" title="Speak">🎤</button><button id="rev-send" title="Send">➤</button></div>' +
+    '<div id="rev-foot"><input id="rev-input" aria-label="Type your message to Chitti" placeholder="Type here or tap the mic…" autocomplete="off"/><button id="rev-mic" aria-label="Speak to Chitti" title="Speak">🎤</button><button id="rev-send" aria-label="Send message" title="Send">➤</button></div>' +
     "</div>";
   document.body.appendChild(root);
 
@@ -107,26 +109,50 @@
   }
 
   // Speaks text, then calls cb (used to start the mic afterwards).
+  var sayId = 0; // newest say() call wins; stale callbacks are ignored
+
+  // Chrome silently stops speaking long text, so speak it sentence by sentence.
+  function chunkText(text) {
+    var parts = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
+    var out = [], cur = "";
+    parts.forEach(function (p) {
+      if ((cur + p).length > 180 && cur) { out.push(cur); cur = p; } else { cur += p; }
+    });
+    if (cur) out.push(cur);
+    return out;
+  }
+
   function say(text, cb) {
+    var myId = ++sayId;
     addMsg(text, "bot");
     if (!synth || muted) { if (cb) cb(); return; }
     stopListening();
     synth.cancel();
-    var u = new SpeechSynthesisUtterance(text);
-    var v = pickVoice();
-    if (v) u.voice = v;
-    u.lang = LANG;
-    u.rate = 1;
-    var done = false;
-    function finish() { if (done) return; done = true; speaking = false; if (cb) cb(); }
-    u.onstart = function () { speaking = true; hearBtn.style.display = "none"; };
-    u.onend = finish;
-    u.onerror = function (e) {
-      // Autoplay policy can block speech after a page navigation.
-      if (e && e.error === "not-allowed") { hearBtn.style.display = "block"; }
-      finish();
-    };
-    synth.speak(u);
+    var chunks = chunkText(text), idx = 0, v = pickVoice();
+    function finish() {
+      if (myId !== sayId) return; // a newer message replaced this one
+      speaking = false;
+      if (cb) cb();
+    }
+    function next() {
+      if (myId !== sayId) return;
+      if (idx >= chunks.length) { finish(); return; }
+      var u = new SpeechSynthesisUtterance(chunks[idx++]);
+      if (v) u.voice = v;
+      u.lang = LANG;
+      u.rate = 1;
+      u.onstart = function () { if (myId === sayId) { speaking = true; hearBtn.style.display = "none"; } };
+      u.onend = next;
+      u.onerror = function (e) {
+        if (myId !== sayId) return;
+        // Autoplay policy can block speech after a page navigation.
+        if (e && e.error === "not-allowed") { hearBtn.style.display = "block"; finish(); return; }
+        if (e && (e.error === "interrupted" || e.error === "canceled")) return;
+        next();
+      };
+      synth.speak(u);
+    }
+    next();
   }
 
   /* ---------- Speech to text ---------- */
@@ -139,7 +165,15 @@
       recognizer.maxAlternatives = 1;
       recognizer.onstart = function () { listening = true; micBtn.classList.add("on"); };
       recognizer.onend = function () { listening = false; micBtn.classList.remove("on"); };
-      recognizer.onerror = function () { listening = false; micBtn.classList.remove("on"); };
+      recognizer.onerror = function (e) {
+        listening = false; micBtn.classList.remove("on");
+        var err = e && e.error;
+        if (err === "not-allowed" || err === "service-not-allowed") {
+          addMsg("I can't use your microphone. Please allow mic access in your browser, or just type below.", "bot");
+        } else if (err === "no-speech") {
+          addMsg("I didn't hear anything. Tap 🎤 to try again, or type below.", "bot");
+        }
+      };
       recognizer.onresult = function (e) {
         var text = e.results[0][0].transcript;
         handleUser(text);
@@ -166,19 +200,25 @@
 
   function detectType(raw) {
     var t = norm(raw);
-    if (/(company|business|firm|organi[sz]ation|corporate|broker|accountant|cfo|agency|enterprise)/.test(t)) return "company";
-    if (/(individual|personal|myself|salaried|employee|person|taxpayer|tax payer|freelanc|me)/.test(t)) return "individual";
+    if (/\b(company|companies|business|firm|organi[sz]ation|corporate|broker|brokers|accountant|cfo|agency|enterprise)\b/.test(t)) return "company";
+    if (/\b(individual|personal|myself|salaried|employee|person|taxpayer|tax payer|freelancer|me)\b/.test(t)) return "individual";
     return "";
   }
 
+  // Whole-word match, so "emi" doesn't fire inside "premium".
+  function hasPhrase(t, phrase) { return (" " + t + " ").indexOf(" " + phrase + " ") !== -1; }
+
+  // Speech engines often hear "ITR" as "I T R" - join runs of single letters.
+  function joinLetters(t) { return t.replace(/\b[a-z](?: [a-z])+\b/g, function (m) { return m.replace(/ /g, ""); }); }
+
   function findTool(raw, type) {
-    var t = norm(raw);
+    var t = joinLetters(norm(raw));
     var list = TOOLS[type].tools, best = null, bestScore = 0;
     list.forEach(function (tool, i) {
       var score = 0;
-      tool.match.forEach(function (m) { if (t.indexOf(norm(m)) !== -1) score += norm(m).length; });
-      norm(tool.name).split(" ").forEach(function (w) { if (w.length > 3 && t.indexOf(w) !== -1) score += 2; });
-      if (t.indexOf(["first", "second", "third", "fourth", "fifth"][i] || "~~") !== -1) score += 3;
+      tool.match.forEach(function (m) { if (hasPhrase(t, norm(m))) score += norm(m).length; });
+      norm(tool.name).split(" ").forEach(function (w) { if (w.length > 3 && hasPhrase(t, w)) score += 2; });
+      if (hasPhrase(t, ["first", "second", "third", "fourth", "fifth"][i] || "~~")) score += 3;
       if (score > bestScore) { bestScore = score; best = tool; }
     });
     return best;
@@ -189,7 +229,7 @@
     state = { step: "ask_name", name: "", type: "", pendingTool: "" };
     save();
     clearUI();
-    say("Hi! Welcome to ReportEdge. What is your name?", startListening);
+    say("Hi! I am Chitti, your ReportEdge assistant. What is your name?", startListening);
   }
 
   function clearUI() {
@@ -235,7 +275,7 @@
 
   function explainTool(tool) {
     state.step = "explained"; state.pendingTool = ""; state.lastTool = tool.id; save();
-    panel.classList.add("open");
+    panel.classList.add("open"); fab.setAttribute("aria-expanded", "true");
     say(
       tool.name + ". " + tool.summary + " " + tool.example +
         " Would you like to hear about another tool? Just say its name, or say 'show all tools'.",
@@ -260,7 +300,7 @@
 
     // Global commands
     if (/(start over|restart|begin again)/.test(t)) { begin(); return; }
-    if (/(stop|quiet|shut up|be quiet)/.test(t)) { synth && synth.cancel(); stopListening(); return; }
+    if (/\b(stop|quiet|shut up|be quiet)\b/.test(t) && state.step !== "ask_name") { synth && synth.cancel(); stopListening(); return; }
     if (/(show all|all tools|list tools|what tools|other tools|another tool|go back)/.test(t) && state.type) {
       showTools(state.type); return;
     }
@@ -322,11 +362,19 @@
     });
   }
 
+  function closePanel() {
+    panel.classList.remove("open"); fab.setAttribute("aria-expanded", "false");
+    sayId++; speaking = false; // drop any pending speech callbacks
+    synth && synth.cancel(); stopListening();
+  }
   fab.addEventListener("click", function () {
-    if (panel.classList.contains("open")) { panel.classList.remove("open"); synth && synth.cancel(); stopListening(); }
-    else openPanel();
+    if (panel.classList.contains("open")) closePanel();
+    else { fab.setAttribute("aria-expanded", "true"); openPanel(); inputEl.focus(); }
   });
-  $("rev-close").addEventListener("click", function () { panel.classList.remove("open"); synth && synth.cancel(); stopListening(); });
+  $("rev-close").addEventListener("click", function () { closePanel(); fab.focus(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && panel.classList.contains("open")) { closePanel(); fab.focus(); }
+  });
   $("rev-mute").addEventListener("click", function () {
     muted = !muted;
     $("rev-mute").textContent = muted ? "🔇" : "🔊";
